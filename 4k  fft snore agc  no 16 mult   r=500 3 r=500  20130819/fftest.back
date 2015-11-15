@@ -1,0 +1,591 @@
+/*------------------------------------------------*/
+/* FFTEST : A test program for FFT module         */
+ 
+#include "adc.h"
+#include <avr/io.h>
+
+#include <avr/pgmspace.h>
+#include "suart.h"		/* Defs for using Software UART module (Debugging via AVRSP-COM) */
+#include "ffft.h"		/* Defs for using Fixed-point FFT module */
+
+#define	SYSCLK		16000000
+  
+extern main_adc();
+
+ extern int sample[2][FFT_N ]  ; //fft_num 128   
+ extern volatile unsigned char pingpang  ;      //两个队列
+  extern volatile unsigned char  pingpang_fresh  ;
+ extern volatile int posi_uart	;	
+extern	volatile unsigned char sendpang ;
+extern volatile unsigned char over ;  
+/*------------------------------------------------*/
+/* Global variables                               */
+
+ //char pool[16];	/* Console input buffer */
+
+//int16_t capture[FFT_N];			/* Wave captureing buffer */
+int temp_sample [FFT_N];	
+complex_t bfly_buff[FFT_N];		/* FFT buffer */
+uint16_t  spektrum[FFT_N/2];		/* Spectrum output buffer */
+uint16_t  spektrum_sample_buff_old[FFT_N];
+
+const unsigned char snore[]="snore/r/n";
+const unsigned char hello[]=" nFFT sample program\r\n";
+
+/*------------------------------------------------*/
+/* Capture waveform                               */
+
+
+
+
+
+
+void init_USART_baud(unsigned long num )//USART 初始化
+{
+    //USART 38400 8, n,1  PC上位机软件(超级终端等)也要设成同样的设置才能通讯
+    UCSRC = (1<<URSEL) | 0x06;    //异步，8位数据，无奇偶校验，一个停止位，无倍速    
+    UBRRL=(F_CPU/num/16-1)%256;
+    UBRRH= (F_CPU/num/16-1)/256;
+    UCSRA = 0x00;
+    UCSRB |=  (1<<TXEN); //使能接收中断，使能接收，使能发送
+     
+    //UCSRB = (1<<TXEN);    // 使能发送
+} 
+
+	usart_interrupt_en()
+	
+	{
+	 
+	UCSRB|=(1<<TXCIE) ; //使能接收中断，使能接收，使能发送
+	}
+       void send_c(  char schar) //发送采用查询方式
+{
+    while( !(UCSRA & (1<<UDRE)) );
+    UDR=schar;
+}
+
+   int usart_write( unsigned char* buf  , int num)
+          { int i;
+           for(i=0;i<num;i++)
+               
+               {
+               send_c(* buf++) ;
+               }
+               
+           return   num;  
+          
+          
+          
+          }
+   
+
+
+
+void capture_wave (int16_t *buffer, uint16_t count)
+{
+	ADMUX = _BV(REFS0)|_BV(ADLAR)|_BV(MUX2)|_BV(MUX1)|_BV(MUX0);	// channel
+
+	do {
+		ADCSRA = _BV(ADEN)|_BV(ADSC)|_BV(ADFR)|_BV(ADIF)|_BV(ADPS2)|_BV(ADPS1);
+		while(bit_is_clear(ADCSRA, ADIF));
+		*buffer++ = ADC - 32768;
+	} while(--count);
+
+	ADCSRA = 0;
+}
+
+
+/* This is an alternative function of capture_wave() and can omit captureing buffer.
+
+void capture_wave_inplace (complex_t *buffer, uint16_t count)
+{
+	const prog_int16_t *window = tbl_window;
+	int16_t v;
+
+	ADMUX = _BV(REFS0)|_BV(ADLAR)|_BV(MUX2)|_BV(MUX1)|_BV(MUX0);	// channel
+
+	do {
+		ADCSRA = _BV(ADEN)|_BV(ADSC)|_BV(ADFR)|_BV(ADIF)|_BV(ADPS2)|_BV(ADPS1);
+		while(bit_is_clear(ADCSRA, ADIF));
+		v = fmuls_f(ADC - 32768, pgm_read_word_near(window));
+		buffer->r = v;
+		buffer->i = v;
+		buffer++; window++;
+	} while(--count);
+
+	ADCSRA = 0;
+}
+*/
+
+/*------------------------------------------------*/
+/* Online Monitor via an ISP cable                */
+
+unsigned int mean(uint16_t * spectrum,unsigned char num)
+
+{ unsigned char i;
+unsigned int sum=0;
+for(i=0;i<num;i++)
+{
+sum+=*spectrum++;
+}
+return  sum/num;
+}
+
+unsigned int peak(uint16_t * spectrum_in,unsigned int  num)
+
+{  unsigned char i,index;
+   unsigned int max=0;
+   for(i=0;i<num;i++)
+   {
+    if (*spectrum_in>max)
+     max=*spectrum_in;
+	 index=i;
+   }
+   return  index;
+}
+
+//   float on zero ;
+
+void off_bias(int * sample,int num)
+{ int i=0;
+   for (i=0;i<num;i++)
+   
+   {
+   *sample=*sample-512;
+   
+   sample++;
+   }
+}
+//   direct calc 
+int  cross_zero (int * sampl,int num)
+
+{
+int i=0,present; 
+static int temp_sample=1;
+
+ unsigned int sum=0;
+for (i=0;i<num;i++)
+   
+   {if ( * sampl>2)
+   present=1;
+   if (( * sampl++)<-2)
+   present=-1;
+       
+   
+   if( temp_sample!=present)
+   sum++;
+   temp_sample=present;
+   }
+   return sum ;
+}
+ long unsigned int energy_do(int * sample,int num)
+{  int i=0;long unsigned int energy=0;
+    
+  for (i=0;i<num;i++)
+   
+   { 
+   
+   
+   energy+=  (* sample)*(* sample++);
+   }
+  return energy;
+}
+
+void fft_input_no_window(int * sample,complex_t *dest,int num)
+
+
+{
+
+
+ int i=0;
+
+  for (i=0;i<num;i++)
+   
+   { 
+   
+    dest->r = * sample  ;
+     dest->i = * sample++ ;
+   dest++;
+   }
+
+
+}
+
+copy_buff(int * source,int * dest ,int num)
+
+
+
+{
+
+
+ int i=0;
+
+  for (i=0;i<num;i++)
+   
+   { 
+   
+    *dest++ = * source++ ;
+    
+   
+   }
+
+
+}
+
+
+ 
+
+unsigned char judge( uint16_t * spectrum)
+{
+unsigned int low,middle,high,whole,max;
+float scale,devia,deviation;
+
+whole=mean(spectrum,FFT_N/2);
+low=mean(spectrum+1,18);
+middle=mean(spectrum+20,20);//20---40
+high=mean(spectrum+50,10);//50---60
+
+scale=middle/low;
+max=peak(spectrum,FFT_N/2);
+deviation=max/high;
+devia=max/high;
+if (scale >1.5&&devia<2.5&&deviation<3)
+
+     usart_write(snore,10);	   
+
+}
+	  void    write( unsigned char turn) 
+{
+
+  sendpang=turn;
+  
+  send_c(*(sample[0]) );
+  posi_uart=1;
+   
+}
+
+  
+
+ void correction( int * dest,int * source,int num )
+ {
+ int i=0;
+
+  for (i=0;i<num;i++)
+   
+   { 
+   
+    (*dest)  = (  * dest++)*(* source++) ;
+    
+   
+   }
+ 
+ }
+ 
+ 
+ void correlation( int * dest,int * source,int num )
+ {
+ int i=0;
+
+  for (i=3;i<num;i++)
+   
+   { 
+   
+    (*dest)  = (  * dest++)+(* source++) ;
+    
+   
+   }
+ 
+ }
+ 
+ 
+ 
+ 
+ 				
+int main (void)
+{
+	char *cp;
+	uint16_t m, n, s;
+	uint16_t t1,t2,t3;
+	long unsigned int energy;
+	unsigned char index;
+	unsigned char pitch_flg,pre_flag[4],signal_count,count_pitch,nosignal_count,peak_index[4],snore_flag;
+  int diff;
+  	 
+    main_adc();
+ 
+	//xmitstr(PSTR("\r\nFFT sample program\r\n"));
+	 init_USART_baud(256000 );
+  ////usart_write(hello ,23);
+	//usart_interrupt_en();
+	
+		
+	 
+usart_write( hello , 17);
+
+	
+	for(;;) {
+		 
+	   /*  */
+		   if ((pingpang_fresh ==0x01)&& (over==1 ) )//new frame createded   
+				 
+				 {     
+																				
+				  // usart_write(sample[0] ,256);
+				   sendpang=0;
+				   posi_uart=0;
+				  	  over=1;
+					//  usart_interrupt_en();	
+					 
+             off_bias(sample[0] ,FFT_N );//-512
+			 copy_buff(sample[0],spektrum_sample_buff_old, FFT_N );  //back
+			 energy=energy_do(sample[0] ,FFT_N );
+				fft_input_no_window(sample[0], bfly_buff,FFT_N);
+			 diff =cross_zero(sample[0] ,FFT_N );
+								 
+			 		 
+				
+			 	
+				
+				if ((energy>5000)&&(diff>20))
+                {
+
+                     if (pitch_flg==1)
+                      {
+                        nosignal_count=0;
+                          count_pitch++;				
+				
+            	      fft_execute(bfly_buff);
+			 
+				      fft_output(bfly_buff, spektrum); 
+					 
+					  correlation(spektrum_sample_buff_old,spektrum,FFT_N/2 );
+					  
+					  peak_index[3]=peak(spektrum_sample_buff_old,FFT_N/2 );
+					  
+                      copy_buff(spektrum,spektrum_sample_buff_old, FFT_N/2 ); 
+                      
+                      
+					    if ((peak_index[3]>=2) &&(peak_index[3]<=14))
+					     {
+					     pre_flag[3]=1;
+					     if ((peak_index[0]+peak_index[2]+peak_index[3]+peak_index[1])==4)
+					      {
+						    snore_flag=1;
+							pitch_flg=0;
+							count_pitch=0;
+							pre_flag[0]=0;
+							pre_flag[1]=0;
+							pre_flag[2]=0;
+							pre_flag[3]=0;
+							peak_index[0]=1;
+							peak_index[1]=1;
+							peak_index[2]=1;
+							peak_index[3]=1;
+												
+							
+						   }
+						  else 
+						  
+					      {
+  
+                            pre_flag[3]=0;
+							
+							peak_index[0]=1;
+							peak_index[1]=1;
+							peak_index[2]=1;
+							peak_index[3]=1;
+						 
+                            }    
+					       pre_flag[0]=pre_flag[1];
+							pre_flag[1]=pre_flag[2];
+							pre_flag[2]=pre_flag[3];
+						 
+							
+							peak_index[0]=peak_index[1];
+							peak_index[1]= peak_index[2];
+							peak_index[2]=peak_index[3];
+							 
+													
+					      }
+						   
+					  
+				  }
+               else
+			   
+			    {
+			   nosignal_count++;
+			   
+			       if (nosignal_count>30)
+			        {
+			         pitch_flg=1;
+			         count_pitch=0;		 
+					}
+			   count_pitch=0;
+			   pre_flag[0]=0;
+			pre_flag[1]=0;
+			pre_flag[2]=0;
+		    pre_flag[3]=0;
+			peak_index[0]=1;
+			peak_index[1]=1;
+			peak_index[2]=1;
+			peak_index[3]=1;
+			   
+			   }
+			   
+			   
+			   
+			   
+  			
+  			//	correction (spektrum,spektrum_sample_buff_old,FFT_N/2 );
+      			// index= peak(spektrum, FFT_N/2);
+				
+				if (count_pitch>80)
+				{
+				pitch_flg=0;
+				}
+				
+				
+				
+				
+    				
+				pingpang_fresh &=0xfe;// new feame free
+				 
+			}	
+					
+			}
+				
+		   	if ( (pingpang_fresh ==0x02)&& (over==1) )//new frame  createded  
+																			 
+			   { 
+				 //usart_write(sample[1] ,256);
+				 sendpang=1;
+				 posi_uart=0;
+				 over=1;
+			 	 //usart_interrupt_en();
+				 
+				 
+				 
+				 off_bias(sample[1] ,FFT_N );
+				 copy_buff(sample[1],spektrum_sample_buff_old, FFT_N );  ///back	 
+					 
+			
+					 
+				 
+			 	energy=energy_do(sample[1] ,FFT_N );
+				 
+				fft_input_no_window(sample[1], bfly_buff,FFT_N);
+			 		diff =cross_zero(sample[1] ,FFT_N );
+					
+					
+				 				
+				if ((energy>5000)&&(diff>20))
+                {
+
+                     if (pitch_flg==1)
+                      {
+                        nosignal_count=0;
+                          count_pitch++;				
+				
+            	      fft_execute(bfly_buff);
+			 
+				      fft_output(bfly_buff, spektrum); 
+					 
+					  correlation(spektrum_sample_buff_old,spektrum,FFT_N/2 );
+					  
+					  peak_index[3]=peak(spektrum_sample_buff_old,FFT_N/2 );
+					  
+                      copy_buff(spektrum,spektrum_sample_buff_old, FFT_N/2 ); 
+                      
+                      
+					    if ((peak_index[3]>=2) &&(peak_index[3]<=14))
+					     {
+					     pre_flag[3]=1;
+					     if ((peak_index[0]+peak_index[2]+peak_index[3]+peak_index[1])==4)
+					      {
+						    snore_flag=1;
+							pitch_flg=0;
+							count_pitch=0;
+							pre_flag[0]=0;
+							pre_flag[1]=0;
+							pre_flag[2]=0;
+							pre_flag[3]=0;
+							peak_index[0]=1;
+							peak_index[1]=1;
+							peak_index[2]=1;
+							peak_index[3]=1;
+												
+							
+						   }
+						  else 
+						  
+					      {
+  
+                            pre_flag[3]=0;
+							
+							peak_index[0]=1;
+							peak_index[1]=1;
+							peak_index[2]=1;
+							peak_index[3]=1;
+						 
+                            }    
+					       pre_flag[0]=pre_flag[1];
+							pre_flag[1]=pre_flag[2];
+							pre_flag[2]=pre_flag[3];
+						 
+							
+							peak_index[0]=peak_index[1];
+							peak_index[1]= peak_index[2];
+							peak_index[2]=peak_index[3];
+							 
+													
+					      }
+						   
+					  
+				  }
+               else
+			   
+			    {
+			   nosignal_count++;
+			   
+			       if (nosignal_count>30)
+			        {
+			         pitch_flg=1;
+			         count_pitch=0;		 
+					}
+			   count_pitch=0;
+			   pre_flag[0]=0;
+			pre_flag[1]=0;
+			pre_flag[2]=0;
+		    pre_flag[3]=0;
+			peak_index[0]=1;
+			peak_index[1]=1;
+			peak_index[2]=1;
+			peak_index[3]=1;
+			   
+			   }
+			   
+			   
+			   
+			   
+  			
+  			//	correction (spektrum,spektrum_sample_buff_old,FFT_N/2 );
+      			// index= peak(spektrum, FFT_N/2);
+				
+				if (count_pitch>80)
+				{
+				pitch_flg=0;
+				}
+				
+				
+				
+
+				 
+			       pingpang_fresh &=0xfd;// new feame free
+				 
+				  
+		      }       
+		 /*	*/												 
+		    }
+		 	
+		}
+}
